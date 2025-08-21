@@ -1,0 +1,123 @@
+import streamlit as st
+from pdfminer.high_level import extract_text
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+import tempfile
+import os
+import httpx
+import tiktoken
+
+tiktoken_cache_dir = "./token"
+os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
+
+client = httpx.Client(verify=False)
+
+@st.cache_resource
+
+def get_llm_embed():
+    # LLM and Embedding setup
+    llm = ChatOpenAI(
+    base_url="https://genailab.tcs.in",
+    model="azure_ai/genailab-maas-DeepSeek-V3-0324",
+    api_key="sk-h4SzToxOqOneSAXq191PXA",
+    http_client=client
+    )
+    embedding_model = OpenAIEmbeddings(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-text-embedding-3-large",
+    api_key="sk-h4SzToxOqOneSAXq191PXA",
+    http_client=client
+    )
+    return llm, embedding_model
+
+
+st.set_page_config(page_title="RAG PDF Summarizer")
+
+st.title(" RAG-powered PDF Summarizer")
+
+if 'message' not in st.session_state:
+    st.session_state.message = []
+if 'rag_chain' not in st.session_state:
+    st.session_state.rag_chain = None
+if 'pdf_processed' not in st.session_state:
+    st.session_state.pdf_processed = False
+    
+upload_file = st.file_uploader("Upload a PDF", type="pdf")
+
+if upload_file and not st.session_state.pdf_processed:
+    if st.button("Process PDF"):
+        with st.spinner("Processing..."): 
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+                    temp_file.write(upload_file.read())
+                    temp_file_path = temp_file.name
+                # Step 1: Extract text
+                raw_text = extract_text(temp_file_path)
+                # Step 2: Chunking
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                chunks = text_splitter.split_text(raw_text)
+        
+                llm, embedding_model = get_llm_embed()
+                # Step 3: Embed and store in Chroma
+                # with st.spinner("Indexing document..."):
+                vectordb = Chroma.from_texts(
+                    chunks, 
+                    embedding_model,
+                    persist_directory="./chroma_index"
+                )
+                vectordb.persist()
+                # Step 4: RAG QA Chain
+                #retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+                retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+                #retriever = vectordb.as_retriever()
+                rag_chain = RetrievalQA.from_chain_type(
+                    llm=llm,
+                    retriever=retriever,
+                    return_source_documents=True
+                )
+                st.session_state.pdf_processed = True
+        
+                os.unlink(temp_file_path)
+        
+                st.sucess("PDF processed successfully!")
+                st.rerun()
+        
+            except Exception as E:
+                st.error(f"Error: {Str(E)}")
+
+if st.session_state.pdf_processed:
+    st.write("----")
+    st.subheader("Chat with pdf")
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    if prompt:= st.chat_input("Ask a question about your pdf..."):
+        st.session_state.message.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.write(prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking.."):
+                try:
+                    result = st.session_state.rag_chain.invoke(prompt)
+                    response = result['result']
+                    st.write(response)
+                    st.session_state.message,append({"role": "assistant", "content": response})
+                    
+                except Exception as e:
+                    err_msg = f"Sorry, Error Occured, Error: {Str(e)}"
+                    st.write(err_msg)
+                    st.session_state.message,append({"role": "assistant", "content": err_msg})
+                    
+    if st.button("Clear Chat"):
+        st.session_state.messages = []
+        st.rerun()
+else:
+    st.info("Please Upload the PDF..")
+
+
+
